@@ -14,6 +14,28 @@ from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import tool
 from ddgs import DDGS
 
+# ---------------------------------------------------------------------------
+# WORKAROUND for a bug in the current stable crewai release.
+#
+# crewai tags certain messages with a "cache_breakpoint" flag, meant for
+# providers that support prompt caching (like Anthropic). That flag is
+# supposed to get stripped back out before the request is sent to any
+# provider that doesn't understand it — but in the currently pinned stable
+# release, that cleanup step only exists for native provider adapters
+# (Anthropic, Bedrock). When a model is routed through the generic LiteLLM
+# path instead (which is what happens for Groq today, see requirements.txt),
+# the flag leaks straight into the request body and Groq's API rejects it
+# with: "property 'cache_breakpoint' is unsupported".
+#
+# This fix has already landed in crewai's development branch and will
+# eventually ship in a stable release, at which point this block can be
+# deleted. Until then, we neutralize it ourselves: `mark_cache_breakpoint`
+# is imported freshly (locally) each time crewai needs it, so replacing it
+# here — before any Agent/Task/Crew is built — makes it a no-op everywhere.
+import crewai.llms.cache as _crewai_cache
+_crewai_cache.mark_cache_breakpoint = lambda message: dict(message)
+# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # 1. THE SEARCH TOOL
