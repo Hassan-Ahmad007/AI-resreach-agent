@@ -1,5 +1,5 @@
-crewai
-litellm
-ddgs
-streamlit
-python-dotenv
+crewai>=1.15.0,<2.0.0
+litellm>=1.60.0
+ddgs>=9.0.0
+streamlit>=1.38.0
+python-dotenv>=1.0.1
