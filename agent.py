@@ -10,6 +10,9 @@ This file defines:
 Keeping everything in one file makes it easy to read as a beginner.
 """
 
+import time
+
+import litellm
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import tool
 from ddgs import DDGS
@@ -60,8 +63,11 @@ def duckduckgo_search(query: str) -> str:
     """
     try:
         with DDGS() as ddgs:
-            # max_results MUST be passed as a keyword argument (not positional)
-            results = list(ddgs.text(query, max_results=5))
+            # max_results MUST be passed as a keyword argument (not positional).
+            # Kept small (3) on purpose: every result gets echoed back into the
+            # conversation on every following step, so a bigger number here
+            # burns through Groq's free-tier tokens-per-minute limit fast.
+            results = list(ddgs.text(query, max_results=3))
     except Exception as exc:  # network hiccups, rate limits, etc.
         return f"Search failed for query '{query}': {exc}"
 
@@ -72,7 +78,8 @@ def duckduckgo_search(query: str) -> str:
     for i, r in enumerate(results, start=1):
         title = r.get("title", "No title")
         link = r.get("href", "")
-        snippet = r.get("body", "")
+        # Truncate long snippets for the same token-budget reason as above.
+        snippet = r.get("body", "")[:220]
         formatted.append(f"{i}. {title}\n   Link: {link}\n   {snippet}")
 
     return "\n\n".join(formatted)
@@ -96,6 +103,10 @@ def build_crew(topic: str, groq_api_key: str) -> Crew:
         model="groq/openai/gpt-oss-120b",
         api_key=groq_api_key,
         temperature=0.5,
+        # Caps how many tokens the model can generate per call. Keeps each
+        # step's usage predictable so we stay under Groq's free-tier
+        # tokens-per-minute limit instead of one big reply eating it all.
+        max_completion_tokens=1200,
     )
 
     researcher = Agent(
@@ -114,6 +125,11 @@ def build_crew(topic: str, groq_api_key: str) -> Crew:
         llm=llm,
         verbose=True,          # prints the agent's thinking to the terminal/logs
         allow_delegation=False,  # single agent, nobody else to delegate to
+        # Caps the number of think/act loop iterations. Without a limit, a
+        # stubborn agent can keep searching and re-reading its own growing
+        # context, which is the fastest way to blow through a tokens-per-
+        # minute limit on a free API tier.
+        max_iter=8,
     )
 
     research_task = Task(
@@ -155,7 +171,28 @@ def run_research(topic: str, groq_api_key: str) -> str:
     Public function used by the Streamlit app.
     Builds a crew for the given topic and API key, runs it, and returns
     the final report text.
+
+    Groq's free tier has a tokens-per-minute limit. If the agent happens to
+    hit it mid-run, we don't want the whole app to just crash — we retry a
+    couple of times with a short wait, since the limit resets every minute.
     """
-    crew = build_crew(topic=topic, groq_api_key=groq_api_key)
-    result = crew.kickoff()
-    return str(result)
+    max_attempts = 3
+    wait_seconds = 20  # Groq's free-tier TPM budget resets on a per-minute window
+
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        crew = build_crew(topic=topic, groq_api_key=groq_api_key)
+        try:
+            result = crew.kickoff()
+            return str(result)
+        except litellm.RateLimitError as exc:
+            last_error = exc
+            if attempt < max_attempts:
+                time.sleep(wait_seconds)
+                wait_seconds *= 2  # back off a little more each retry
+
+    raise RuntimeError(
+        "Groq's free-tier rate limit (tokens per minute) was hit several "
+        "times in a row. Wait about a minute and try again, or try a more "
+        "specific/narrower topic so the agent needs fewer search steps."
+    ) from last_error
